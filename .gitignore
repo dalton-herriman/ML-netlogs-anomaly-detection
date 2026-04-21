@@ -58,3 +58,7 @@ logs/
 *.tmp
 *.swp
 *.bak
+
+docs
+docs/
+docs/*
