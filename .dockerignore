@@ -1,0 +1,43 @@
+.git
+.github
+.gitignore
+.dockerignore
+.python-version
+.env
+.env.*
+!.env.example
+
+# Local virtual envs — never copy into the image
+env/
+venv/
+.venv/
+
+# Python build/cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ML / data — built or downloaded at runtime
+mlruns/
+models/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Editor / OS
+.DS_Store
+*.swp
+
+# Docs, notebooks, CI
+docs/
+notebooks/
+README.md
+SECURITY.md
+LICENSE
