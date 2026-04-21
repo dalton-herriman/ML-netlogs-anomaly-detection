@@ -1,56 +1,69 @@
-import pandas as pd
+"""Batch CSV inference — loads the saved model + scaler and scores a CSV."""
+
+from __future__ import annotations
+
 import argparse
+import logging
+from pathlib import Path
+
 import joblib
-from sklearn.preprocessing import StandardScaler
+import numpy as np
+import pandas as pd
 
-def load_and_preprocess(input_csv):
+from src.api import FEATURE_COLUMNS
+from src.config import get_settings
+
+log = logging.getLogger(__name__)
+
+
+def load_features(input_csv: str) -> pd.DataFrame:
     df = pd.read_csv(input_csv)
-
-    # Normalize column names
     df.columns = df.columns.str.strip().str.lower()
-
-    # Drop irrelevant columns (if present)
     df = df.drop(columns=["flow id", "timestamp", "label"], errors="ignore")
-
-    # Fill missing and replace infs
-    df = df.fillna(0)
-    df.replace([float('inf'), float('-inf')], 0, inplace=True)
-
-    # Encode categorical features
+    df = df.replace([np.inf, -np.inf], 0).fillna(0)
     for col in df.select_dtypes(include="object").columns:
         df[col] = pd.factorize(df[col])[0]
+    missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input missing required feature columns: {missing}")
+    return df[FEATURE_COLUMNS]
 
-    # Scale numeric values
-    scaler = StandardScaler()
-    df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns)
 
-    return df_scaled
-
-def run_inference(model_path, input_csv):
-    print(f"[INFO] Loading model from {model_path}")
+def run_inference(model_path: str, scaler_path: str, input_csv: str) -> pd.DataFrame:
+    log.info("Loading artifacts", extra={"model_path": model_path, "scaler_path": scaler_path})
     model = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
 
-    print(f"[INFO] Preprocessing input data from {input_csv}")
-    data = load_and_preprocess(input_csv)
+    features = load_features(input_csv)
+    scaled = scaler.transform(features)
 
-    print("[INFO] Generating predictions...")
-    predictions = model.predict(data)
-    probabilities = model.predict_proba(data)[:, 1]
+    predictions = model.predict(scaled)
+    probabilities = model.predict_proba(scaled)[:, 1]
+    return pd.DataFrame(
+        {
+            "prediction": predictions.astype(int),
+            "anomaly_score": np.round(probabilities, 4),
+        }
+    )
 
-    results = pd.DataFrame({
-        "prediction": predictions,
-        "anomaly_score": probabilities
-    })
 
-    print("\n=== Inference Results ===")
-    print(results.head())
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    settings = get_settings()
+    parser = argparse.ArgumentParser(description="Run batch inference on a CSV.")
+    parser.add_argument("--model", default=settings.model_path)
+    parser.add_argument("--scaler", default=settings.scaler_path)
+    parser.add_argument("--input", required=True, help="Path to input CSV file")
+    parser.add_argument("--output", default=None, help="Optional CSV path to write predictions")
+    return parser.parse_args(argv)
 
-    return results
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="models/xgb_model.joblib", help="Path to saved model file")
-    parser.add_argument("--input", required=True, help="Path to input CSV file")
-    args = parser.parse_args()
-
-    run_inference(args.model, args.input)
+    logging.basicConfig(level="INFO")
+    args = _parse_args()
+    results = run_inference(args.model, args.scaler, args.input)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        results.to_csv(args.output, index=False)
+        print(f"[+] Wrote {len(results)} predictions to {args.output}")
+    else:
+        print(results.head().to_string(index=False))
