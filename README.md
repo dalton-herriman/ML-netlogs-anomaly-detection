@@ -1,143 +1,167 @@
 # Anomaly Detection in Network Logs
 
-Detect suspicious or anomalous network activity using machine learning. This project demonstrates how to process raw network logs, extract meaningful features, train a model, and deploy an inference API for real-time detection.
+[![CI](https://github.com/dalton-herriman/ML-netlogs-anomaly-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/dalton-herriman/ML-netlogs-anomaly-detection/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 
----
+Production-style ML service for SOC anomaly detection on network flow logs. Trains an XGBoost classifier on CICIDS-2017-shaped flow features, serves predictions behind a FastAPI endpoint, and ships with MLflow experiment tracking plus a Prometheus + Grafana observability stack.
 
-## 📌 Overview
+## Quickstart
 
-- **Goal:** Identify anomalous traffic (e.g., DDoS, port scans) from network logs using supervised machine learning.
-- **Dataset:** CICIDS 2017 (Canadian Institute for Cybersecurity)
-- **Tech Stack:**
-  - Python (Pandas, Scikit-learn, XGBoost)
-  - FastAPI (Real-time API)
-  - Docker (Containerized deployment)
-  - MLFlow (Model tracking)
-  - Prometheus + Grafana (Monitoring)
-
----
-
-## 🚀 Features
-
-✅ Data preprocessing and feature extraction  
-✅ Supervised anomaly classification  
-✅ FastAPI-based inference endpoint  
-✅ Dockerized for easy deployment  
-✅ Model metrics logged with MLflow  
-✅ Monitoring hooks (inference time, request count)
-
----
-
-## 📂 Project Structure
-```plaintext
-anomaly-detector/
-├── data/                 # pre-processed datasets
-├── notebooks/            # Jupyter notebooks for EDA and training
-├── src/
-│   ├── preprocess.py     # Log parsing and feature extraction
-│   ├── train.py          # Model training and evaluation
-│   ├── inference.py      # Core prediction logic
-│   └── api.py            # FastAPI app for serving predictions
-├── Dockerfile            # Container build configuration
-├── requirements.txt      # Python dependencies
-├── .env.example          # Environment variable template
-└── README.md             # Project documentation
-```
-
----
-
-## 🧪 Model Training
-
-1. Download the [CICIDS 2017 dataset](https://www.unb.ca/cic/datasets/ids-2017.html) (registration required)
-2. Preprocess Logs
-   2.1. Place your raw CSVs in data/raw/, then run:
-   ```bash
-    python src/preprocess.py --input data/raw/ --output data/processed/
-   ```
-3. Train the model
 ```bash
-python src/train.py --input data/processed/
+git clone https://github.com/dalton-herriman/ML-netlogs-anomaly-detection.git && cd ML-netlogs-anomaly-detection
+python scripts/generate_sample.py && python -m src.preprocess --input data/raw/sample.csv --output data/processed/ && python -m src.train --train data/processed/train.csv --test data/processed/test.csv
+docker compose up --build -d && curl -s -X POST http://localhost:8000/predict -H 'content-type: application/json' -d @tests/fixtures/sample_request.json
 ```
 
----
+That trains a toy model, starts the API + Prometheus + Grafana, and gets a prediction back — no external dataset required.
 
-## 🌐 Inference API
-Start the API server:
-```bash
-uvicorn src.api:app --host 0.0.0.0 --port 8000
-```
+## What's actually in here
 
----
+| Component | Path | Notes |
+| --- | --- | --- |
+| FastAPI service | `src/api.py` | `/predict`, `/batch_predict`, `/healthz`, `/metrics`, `/`. JSON structured logs, request-ID middleware, 422 on validation errors, 500 handler that never leaks internals, 503 when no model is loaded. |
+| Custom metrics | `src/api.py` | `predictions_total{label,endpoint}` counter + `inference_latency_seconds{endpoint}` histogram, on top of `prometheus-fastapi-instrumentator`'s default HTTP metrics. |
+| Config loader | `src/config.py` | Pydantic Settings, reads `.env` + environment. Example values in [`.env.example`](./.env.example). |
+| Structured logging | `src/logging_setup.py` | JSON formatter with request-ID context, stdlib-only. |
+| Training | `src/train.py` | XGBoost classifier; logs params, precision/recall/F1/ROC-AUC and the model artifact to MLflow (local `./mlruns` by default). |
+| Preprocessing | `src/preprocess.py` | Normalises CICIDS-style CSVs into a train/test split. |
+| Batch CSV inference | `src/inference.py` | Offline scoring using the saved model + scaler. |
+| Sample data generator | `scripts/generate_sample.py` | Emits a tiny CICIDS-shaped CSV so anyone who clones the repo can train end-to-end in <60s. |
+| Docker image | `Dockerfile` | `python:3.12-slim`, non-root user, `curl`-based healthcheck, runs `uvicorn src.api:app`. |
+| Compose stack | `docker-compose.yml` | `api` + `prometheus` (:9090) + `grafana` (:3000). Grafana is pre-provisioned with a Prometheus datasource and an "Anomaly Detection API" dashboard. |
+| Prometheus config | `ops/prometheus/prometheus.yml` | Scrapes `api:8000/metrics` every 15s. |
+| Grafana provisioning | `ops/grafana/` | Datasource + dashboard provisioning, dashboard JSON under `ops/grafana/dashboards/api.json`. |
+| Tests | `tests/` | Pytest suite — unit tests per `src/` module + FastAPI `TestClient` tests for every endpoint. Toy model is trained on the fly; no real dataset is downloaded. |
+| CI | `.github/workflows/ci.yml` | Python 3.12 on Ubuntu — ruff, mypy (non-blocking), pytest with coverage gate at 70%. |
 
-### 📥 Dataset Instructions
+## Endpoints
 
-This project uses the CICIDS 2017 dataset from the Canadian Institute for Cybersecurity.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`  | `/`              | Liveness sanity check. |
+| `GET`  | `/healthz`       | Returns `{status, model_loaded}` — model-independent. |
+| `POST` | `/predict`       | Score a single flow (see example below). |
+| `POST` | `/batch_predict` | Score up to 1000 flows per request. |
+| `GET`  | `/metrics`       | Prometheus exposition format. |
 
-Download link: https://www.unb.ca/cic/datasets/ids-2017.html  
-You must register to access the data.
+### Example request
 
-Once downloaded, place the appropriate CSV file (e.g., `Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv`) in: data/raw/
-
-Then run the preprocessing step:
-```bash
-python src/preprocess.py --input data/raw/filename.csv --output data/processed/clean.csv
-```
-
----
-
-### ✅ Optional: Upload Small Samples
-You *can* include a **sample CSV (few rows)** for demo/testing purposes in a `sample_data/` folder if needed.
----
-
-### Example Request
 ```json
 POST /predict
-
 {
-  "src_ip": "192.168.1.100",
-  "dst_ip": "192.168.1.1",
-  "src_port": 443,
-  "dst_port": 51515,
-  "protocol": "TCP",
+  "duration": 3.4,
+  "protocol": 6,
+  "src_port": 51515,
+  "dst_port": 443,
   "packet_count": 12,
-  "byte_count": 1024,
-  "duration": 3.4
+  "byte_count": 1024
 }
 ```
 
 ### Example response
+
 ```json
 {
-  "anomaly_score": 0.91,
-  "label": "anomaly"
+  "prediction": 0,
+  "anomaly_score": 0.12
 }
 ```
 
-## Docker
-```bash
-docker build -t anomaly-detector .
-docker run -p 8000:8000 anomaly-detector
+## Architecture
+
+```text
+                  ┌──────────────────────┐
+                  │ scripts/             │
+                  │ generate_sample.py   │  ← synthetic CICIDS-shaped data
+                  └──────────┬───────────┘
+                             │
+                             ▼
+┌──────────────┐   ┌─────────────────────┐    ┌──────────────┐
+│ data/raw/    │→→ │ src/preprocess.py   │→→  │ data/        │
+│              │   │ (clean, split)      │    │ processed/   │
+└──────────────┘   └─────────────────────┘    └──────┬───────┘
+                                                     │
+                                                     ▼
+                                           ┌─────────────────────┐
+                                           │ src/train.py        │
+                                           │ XGBoost + MLflow    │
+                                           └──────────┬──────────┘
+                                                      │
+                              ┌───────────────────────┴───────────────────────┐
+                              ▼                                               ▼
+                    ┌───────────────────┐                          ┌──────────────────┐
+                    │ models/           │                          │ ./mlruns/        │
+                    │ xgb_model.joblib  │                          │ (MLflow store)   │
+                    │ scaler.joblib     │                          └──────────────────┘
+                    └─────────┬─────────┘
+                              │
+                              ▼
+                    ┌───────────────────────┐          ┌───────────────┐
+                    │ src/api.py (FastAPI)  │ /metrics │ Prometheus    │
+                    │ /predict              │────────▶│ (ops/         │
+                    │ /batch_predict        │          │ prometheus/)  │
+                    │ /healthz /metrics     │          └──────┬────────┘
+                    └───────────────────────┘                 │
+                                                              ▼
+                                                      ┌───────────────┐
+                                                      │ Grafana       │
+                                                      │ (provisioned) │
+                                                      └───────────────┘
 ```
 
-## 📈 Monitoring (Optional)
-Export metrics from api.py using Prometheus client. Then:
-  - Connect Prometheus to the /metrics endpoint
-  - Visualize request counts and latencies in Grafana
+## Development
 
-## 🛡 Security Considerations
-  - Input validation using pydantic
-  - Rate-limiting and IP whitelisting ready to integrate
-  - Ideal for secure SOC toolchains
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest --cov=src
+ruff check .
+```
 
-## 📖 License 
-  - MIT License
+### Training on real CICIDS 2017 data (optional)
 
-## 🤝 Acknowledgments 
-  - CICIDS 2017 Dataset (Canadian Institute for Cybersecurity)
-  - scikit-learn, FastAPI, Docker, MLflow teams
+Register at <https://www.unb.ca/cic/datasets/ids-2017.html>, place CSVs in `data/raw/`, then:
 
-## TODO
-  1. Error handling in api.py
-  2. Log Requests and Predictions
-  3. Add .env and config loader
-  4. /batch_predict endpoint
+```bash
+python -m src.preprocess --input data/raw/your_file.csv --output data/processed/
+python -m src.train --train data/processed/train.csv --test data/processed/test.csv
+```
+
+MLflow runs land in `./mlruns/` by default; point `MLFLOW_TRACKING_URI` at a remote server to change that.
+
+## Observability
+
+After `docker compose up`:
+
+- **API:**        <http://localhost:8000/healthz>
+- **Metrics:**    <http://localhost:8000/metrics>
+- **Prometheus:** <http://localhost:9090/targets>
+- **Grafana:**    <http://localhost:3000> (anonymous Viewer role is enabled; admin login is `admin` / `admin`)
+
+The pre-provisioned "Anomaly Detection API" dashboard shows predictions-per-second by label, p95 inference latency, and HTTP request rate.
+
+## Configuration
+
+All runtime settings come from environment variables (see `.env.example`). The only ones you'll normally change:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_PATH` | `models/xgb_model.joblib` | Where the API loads the classifier from. |
+| `SCALER_PATH` | `models/scaler.joblib` | Where the API loads the feature scaler from. |
+| `LOG_LEVEL` | `INFO` | Root log level for the JSON-formatted logger. |
+| `MLFLOW_TRACKING_URI` | `file:./mlruns` | Local file store by default; point at an MLflow server to centralise runs. |
+| `MLFLOW_EXPERIMENT_NAME` | `anomaly-detection` | MLflow experiment name. |
+
+## Security
+
+See [SECURITY.md](./SECURITY.md) for responsible disclosure. Input is validated via Pydantic; no auth / rate-limiting is configured in this reference build — put the API behind a reverse proxy or API gateway for any real deployment.
+
+## License
+
+[MIT](./LICENSE) © Dalton Herriman
+
+## Acknowledgments
+
+- CICIDS 2017 dataset — Canadian Institute for Cybersecurity
+- FastAPI, scikit-learn, XGBoost, MLflow, Prometheus, Grafana
