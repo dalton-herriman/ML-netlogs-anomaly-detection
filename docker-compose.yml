@@ -1,0 +1,59 @@
+services:
+  api:
+    build: .
+    image: anomaly-detector:latest
+    container_name: anomaly-api
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - MODEL_PATH=/app/models/xgb_model.joblib
+      - SCALER_PATH=/app/models/scaler.joblib
+      - MLFLOW_TRACKING_URI=file:/app/mlruns
+    volumes:
+      - ./models:/app/models
+      - ./mlruns:/app/mlruns
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - obs
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: anomaly-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=1d"
+    depends_on:
+      - api
+    networks:
+      - obs
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: anomaly-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - obs
+
+networks:
+  obs:
+    driver: bridge
